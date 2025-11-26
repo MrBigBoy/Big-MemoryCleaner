@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 
@@ -16,14 +16,14 @@ class Program
         }
 
         Console.WriteLine("=== RAM Cleaner Starter ===");
-        Console.WriteLine("Reducerer processer, trimmer working sets og presser OS til RAM frigivelse...");
+        Console.WriteLine("Reducing processes, trimming working sets, and forcing the OS to release memory...");
 
         long memoryBefore = GetTotalMemoryInUse();
         CleanAllProcesses();
         ForceWindowsToReleaseMemory();
         long memoryAfter = GetTotalMemoryInUse();
 
-        Console.WriteLine($"Færdig. RAM frigivet så meget som Windows tillader. Frigivet: {FormatBytes(memoryBefore - memoryAfter)}");
+        Console.WriteLine($"Done. RAM released as much as Windows allows. Released: {FormatBytes(memoryBefore - memoryAfter)}");
     }
 
     static bool IsRunningAsAdministrator()
@@ -50,34 +50,49 @@ class Program
         }
         catch (Exception ex)
         {
-            Console.WriteLine("Kunne ikke genstarte som administrator: " + ex.Message);
+            Console.WriteLine("Could not restart as administrator: " + ex.Message);
         }
     }
 
     static void CleanAllProcesses()
     {
-        foreach (var proc in Process.GetProcesses())
+        var processes = Process.GetProcesses();
+
+        // Sort processes by memory usage in descending order
+        Array.Sort(processes, (p1, p2) =>
         {
             try
             {
-                // Sæt lav procesprioritet (hvis muligt)
+                return p2.WorkingSet64.CompareTo(p1.WorkingSet64);
+            }
+            catch
+            {
+                return 0;
+            }
+        });
+
+        foreach (var proc in processes)
+        {
+            try
+            {
+                // Set low process priority (if possible)
                 try
                 { proc.PriorityClass = ProcessPriorityClass.BelowNormal; }
                 catch { }
 
-                // Forsøg at trimme working set (frigiver RAM)
+                // Attempt to trim working set (release RAM)
                 EmptyWorkingSet(proc.Handle);
             }
-            catch { /* Ignorér fejl, fortsæt */ }
+            catch { /* Ignore errors, continue */ }
         }
     }
 
     static void ForceWindowsToReleaseMemory()
     {
-        Console.WriteLine("Presser Windows til at frigive cache/standby RAM...");
+        Console.WriteLine("Forcing Windows to release cache/standby RAM...");
 
         List<byte[]> allocations = new List<byte[]>();
-        const int blockSize = 200 * 1024 * 1024; // 200 MB blokke for hurtigere pres
+        const int blockSize = 200 * 1024 * 1024; // 200 MB blocks for faster pressure
 
         try
         {
@@ -88,10 +103,10 @@ class Program
         }
         catch (OutOfMemoryException)
         {
-            Console.WriteLine("Windows RAM presset maks – standby cache smidt ud.");
+            Console.WriteLine("Windows RAM fully pressured – standby cache cleared.");
         }
 
-        // Frigiv igen
+        // Release again
         allocations.Clear();
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -107,7 +122,7 @@ class Program
             {
                 totalMemory += proc.WorkingSet64;
             }
-            catch { /* Ignorér fejl, fortsæt */ }
+            catch { /* Ignore errors, continue */ }
         }
         return totalMemory;
     }
