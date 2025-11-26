@@ -1,214 +1,127 @@
-﻿// Program.cs
-// .NET 6+
-// Kør som Administrator for bedst effekt (ellers kan visse processer ikke åbnes/ændres).
-
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 
 class Program
 {
-    // P/Invoke til EmptyWorkingSet
-    [DllImport("psapi.dll", SetLastError = true)]
-    private static extern bool EmptyWorkingSet(IntPtr hProcess);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr hObject);
-
-    // Access rights
-    private const uint PROCESS_QUERY_INFORMATION = 0x0400;
-    private const uint PROCESS_SET_QUOTA = 0x0100;
-    private const uint PROCESS_TERMINATE = 0x0001;
-    private const uint PROCESS_SET_INFORMATION = 0x0200;
+    [DllImport("psapi.dll")]
+    static extern bool EmptyWorkingSet(IntPtr hProcess);
 
     static void Main()
     {
-        Console.WriteLine("Simple RAM Cleaner (transparent) - Brug med omtanke");
-        Console.WriteLine("Kør som Administrator for bedst resultat.\n");
-
-        while (true)
+        if (!IsRunningAsAdministrator())
         {
-            var procs = ListProcesses();
-
-            Console.WriteLine("\nIndtast index (komma-separeret) eller 'all' for alle processer.");
-            Console.WriteLine("Eller tast 'q' for at afslutte.");
-            Console.Write("Valg: ");
-            var input = Console.ReadLine()?.Trim();
-            if (string.IsNullOrEmpty(input))
-                continue;
-            if (input.Equals("q", StringComparison.OrdinalIgnoreCase))
-                break;
-
-            List<int> indexes = new();
-            if (input.Equals("all", StringComparison.OrdinalIgnoreCase))
-            {
-                for (int i = 0; i < procs.Count; i++)
-                    indexes.Add(i);
-            }
-            else
-            {
-                var parts = input.Split(',', StringSplitOptions.RemoveEmptyEntries);
-                foreach (var p in parts)
-                {
-                    if (int.TryParse(p.Trim(), out int idx) && idx >= 0 && idx < procs.Count)
-                        indexes.Add(idx);
-                }
-            }
-
-            if (indexes.Count == 0)
-            {
-                Console.WriteLine("Ingen gyldige valg. Prøv igen.");
-                continue;
-            }
-
-            Console.WriteLine("\nHvad vil du gøre?");
-            Console.WriteLine("1) Trim working set (EmptyWorkingSet)");
-            Console.WriteLine("2) Sænk prioritet (BelowNormal)");
-            Console.WriteLine("3) Kill process (terminer)");
-            Console.Write("Vælg handling (fx 1): ");
-            var action = Console.ReadLine()?.Trim();
-
-            foreach (var idx in indexes)
-            {
-                var meta = procs[idx];
-                Console.WriteLine($"\n-- Behandler: [{idx}] {meta.Name} (PID {meta.Id}) --");
-                try
-                {
-                    if (action == "1")
-                    {
-                        TryTrimWorkingSet(meta.Id);
-                    }
-                    else if (action == "2")
-                    {
-                        TryLowerPriority(meta.Id);
-                    }
-                    else if (action == "3")
-                    {
-                        TryKill(meta.Id);
-                    }
-                    else
-                    {
-                        Console.WriteLine("Ugyldig handling.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Fejl ved behandling af PID {meta.Id}: {ex.Message}");
-                }
-            }
-
-            Console.WriteLine("\nHandling færdig. Tryk ENTER for at liste processer igen...");
-            Console.ReadLine();
+            RestartAsAdministrator();
+            return;
         }
 
-        Console.WriteLine("Afslutter.");
+        Console.WriteLine("=== RAM Cleaner Starter ===");
+        Console.WriteLine("Reducerer processer, trimmer working sets og presser OS til RAM frigivelse...");
+
+        long memoryBefore = GetTotalMemoryInUse();
+        CleanAllProcesses();
+        ForceWindowsToReleaseMemory();
+        long memoryAfter = GetTotalMemoryInUse();
+
+        Console.WriteLine($"Færdig. RAM frigivet så meget som Windows tillader. Frigivet: {FormatBytes(memoryBefore - memoryAfter)}");
     }
 
-    // Hent simpel metadata for processer
-    private static List<(int Id, string Name, long WorkingSet64, long PrivateBytes)> ListProcesses()
+    static bool IsRunningAsAdministrator()
     {
-        var result = new List<(int, string, long, long)>();
-        var processes = Process.GetProcesses();
-        Console.WriteLine("Index\tPID\tWorkingSet(MB)\tPrivate(MB)\tName");
-        for (int i = 0; i < processes.Length; i++)
+        using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
         {
-            var p = processes[i];
-            long ws = 0, pb = 0;
+            WindowsPrincipal principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+    }
+
+    static void RestartAsAdministrator()
+    {
+        var exeName = Process.GetCurrentProcess().MainModule.FileName;
+        var startInfo = new ProcessStartInfo(exeName)
+        {
+            UseShellExecute = true,
+            Verb = "runas"
+        };
+
+        try
+        {
+            Process.Start(startInfo);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Kunne ikke genstarte som administrator: " + ex.Message);
+        }
+    }
+
+    static void CleanAllProcesses()
+    {
+        foreach (var proc in Process.GetProcesses())
+        {
             try
             {
-                ws = p.WorkingSet64;
-                pb = p.PrivateMemorySize64;
-            }
-            catch { /* nogle processer kan være utilgængelige */ }
+                // Sæt lav procesprioritet (hvis muligt)
+                try
+                { proc.PriorityClass = ProcessPriorityClass.BelowNormal; }
+                catch { }
 
-            Console.WriteLine($"{i}\t{p.Id}\t{ws / 1024 / 1024}\t\t{pb / 1024 / 1024}\t\t{p.ProcessName}");
-            result.Add((p.Id, p.ProcessName, ws, pb));
-        }
-
-        return result;
-    }
-
-    private static void TryTrimWorkingSet(int pid)
-    {
-        IntPtr h = IntPtr.Zero;
-        try
-        {
-            // Åbn processen med de rettigheder der kræves for EmptyWorkingSet
-            h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, false, pid);
-            if (h == IntPtr.Zero)
-            {
-                // fallback: prøv at bruge System.Diagnostics.Process (kræver nogle rettigheder)
-                var p = Process.GetProcessById(pid);
-                Console.WriteLine($"Kunne ikke OpenProcess (fejl {Marshal.GetLastWin32Error()}). Forsøger via Process-objekt...");
-
-                // Vi kan ikke kald EmptyWorkingSet uden handle, men vi prøver at sænke prioritet i stedet
-                TryLowerPriority(pid, warnOnly: true);
-                return;
+                // Forsøg at trimme working set (frigiver RAM)
+                EmptyWorkingSet(proc.Handle);
             }
-
-            bool ok = EmptyWorkingSet(h);
-            if (ok)
-            {
-                Console.WriteLine("EmptyWorkingSet: anmodning sendt. Windows kan have frigivet working set (tjek Task Manager).");
-            }
-            else
-            {
-                Console.WriteLine($"EmptyWorkingSet fejlede (GetLastError: {Marshal.GetLastWin32Error()}). Prøv at køre som Administrator.");
-            }
-        }
-        finally
-        {
-            if (h != IntPtr.Zero)
-            {
-                CloseHandle(h);
-            }
+            catch { /* Ignorér fejl, fortsæt */ }
         }
     }
 
-    private static void TryLowerPriority(int pid, bool warnOnly = false)
+    static void ForceWindowsToReleaseMemory()
     {
+        Console.WriteLine("Presser Windows til at frigive cache/standby RAM...");
+
+        List<byte[]> allocations = new List<byte[]>();
+        const int blockSize = 200 * 1024 * 1024; // 200 MB blokke for hurtigere pres
+
         try
         {
-            var p = Process.GetProcessById(pid);
-            Console.WriteLine($"Nuværende priority: {p.PriorityClass}");
-            if (warnOnly)
+            while (true)
             {
-                Console.WriteLine("Fallback: kan ikke trimme working set, sænker i stedet prioritet (kun fallback).");
+                allocations.Add(new byte[blockSize]);
             }
-
-            p.PriorityClass = ProcessPriorityClass.BelowNormal;
-            Console.WriteLine("Prioritet sat til BelowNormal.");
         }
-        catch (Exception ex)
+        catch (OutOfMemoryException)
         {
-            Console.WriteLine($"Kunne ikke sænke prioritet: {ex.Message} (prøv at køre som Administrator)");
+            Console.WriteLine("Windows RAM presset maks – standby cache smidt ud.");
         }
+
+        // Frigiv igen
+        allocations.Clear();
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
     }
 
-    private static void TryKill(int pid)
+    static long GetTotalMemoryInUse()
     {
-        try
+        long totalMemory = 0;
+        foreach (var proc in Process.GetProcesses())
         {
-            var p = Process.GetProcessById(pid);
-            Console.Write($"Er du sikker på at du vil terminere process {p.ProcessName} (PID {pid})? (y/N): ");
-            var ans = Console.ReadLine();
-            if (!string.Equals(ans, "y", StringComparison.OrdinalIgnoreCase))
+            try
             {
-                Console.WriteLine("Annulleret.");
-                return;
+                totalMemory += proc.WorkingSet64;
             }
+            catch { /* Ignorér fejl, fortsæt */ }
+        }
+        return totalMemory;
+    }
 
-            p.Kill(true); // kill and wait
-            p.WaitForExit(5000);
-            Console.WriteLine("Process terminert.");
-        }
-        catch (Exception ex)
+    static string FormatBytes(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
         {
-            Console.WriteLine($"Kunne ikke terminere: {ex.Message} (prøv at køre som Administrator)");
+            order++;
+            len /= 1024;
         }
+        return string.Format("{0:0.##} {1}", len, sizes[order]);
     }
 }
