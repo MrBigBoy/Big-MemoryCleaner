@@ -1,11 +1,15 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.ServiceProcess;
+using Timer = System.Timers.Timer;
 
 class Program
 {
     [DllImport("psapi.dll")]
     static extern bool EmptyWorkingSet(IntPtr hProcess);
+
+    private static readonly string[] CriticalProcesses = { "System", "svchost", "winlogon", "explorer" };
 
     static void Main()
     {
@@ -18,9 +22,16 @@ class Program
         Console.WriteLine("=== RAM Cleaner Starter ===");
         Console.WriteLine("Reducing processes, trimming working sets, and forcing the OS to release memory...");
 
+        StartMemoryUsageMonitoring();
+        KillUnwantedProcessesAndServices();
+
         long memoryBefore = GetTotalMemoryInUse();
         CleanAllProcesses();
-        ForceWindowsToReleaseMemory();
+        for (int i = 0; i < 10; i++)
+        {
+            ForceWindowsToReleaseMemory();
+            System.Threading.Thread.Sleep(500);
+        }
         long memoryAfter = GetTotalMemoryInUse();
 
         Console.WriteLine($"Done. RAM released as much as Windows allows. Released: {FormatBytes(memoryBefore - memoryAfter)}");
@@ -54,11 +65,64 @@ class Program
         }
     }
 
+    static void StartMemoryUsageMonitoring()
+    {
+        Timer timer = new Timer(60000); // Log memory usage every 60 seconds
+        timer.Elapsed += (sender, e) =>
+        {
+            long memoryInUse = GetTotalMemoryInUse();
+            Console.WriteLine($"[Memory Monitor] Total memory in use: {FormatBytes(memoryInUse)}");
+        };
+        timer.Start();
+    }
+
+    static void KillUnwantedProcessesAndServices()
+    {
+        string[] unwantedProcesses = { "Adobe", "Acrobat", "CreativeCloud", "AdobeUpdateService", "AdobeIPCBroker", "armsvc" };
+        string[] unwantedServices = { "AdobeUpdateService", "AdobeARMservice" };
+
+        foreach (var serviceName in unwantedServices)
+        {
+            try
+            {
+                var service = new ServiceController(serviceName);
+                if (service.Status == ServiceControllerStatus.Running)
+                {
+                    Console.WriteLine($"Stopping service: {serviceName}");
+                    service.Stop();
+                    service.WaitForStatus(ServiceControllerStatus.Stopped);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Could not stop service {serviceName}: {ex.Message}");
+            }
+        }
+
+        foreach (var proc in Process.GetProcesses())
+        {
+            try
+            {
+                if (Array.Exists(CriticalProcesses, critical => proc.ProcessName.Equals(critical, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                foreach (var unwanted in unwantedProcesses)
+                {
+                    if (proc.ProcessName.Contains(unwanted, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Console.WriteLine($"Killing process: {proc.ProcessName}");
+                        proc.Kill();
+                        break;
+                    }
+                }
+            }
+            catch { /* Ignore errors, continue */ }
+        }
+    }
+
     static void CleanAllProcesses()
     {
         var processes = Process.GetProcesses();
-
-        // Sort processes by memory usage in descending order
         Array.Sort(processes, (p1, p2) =>
         {
             try
@@ -75,12 +139,13 @@ class Program
         {
             try
             {
-                // Set low process priority (if possible)
+                if (Array.Exists(CriticalProcesses, critical => proc.ProcessName.Equals(critical, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
                 try
                 { proc.PriorityClass = ProcessPriorityClass.BelowNormal; }
                 catch { }
 
-                // Attempt to trim working set (release RAM)
                 EmptyWorkingSet(proc.Handle);
             }
             catch { /* Ignore errors, continue */ }
@@ -92,21 +157,17 @@ class Program
         Console.WriteLine("Forcing Windows to release cache/standby RAM...");
 
         List<byte[]> allocations = new List<byte[]>();
-        const int blockSize = 200 * 1024 * 1024; // 200 MB blocks for faster pressure
+        const int blockSize = 100 * 1024 * 1024; // 100 MB blocks for controlled pressure
 
         try
         {
-            while (true)
-            {
-                allocations.Add(new byte[blockSize]);
-            }
+            allocations.Add(new byte[blockSize]);
         }
         catch (OutOfMemoryException)
         {
             Console.WriteLine("Windows RAM fully pressured – standby cache cleared.");
         }
 
-        // Release again
         allocations.Clear();
         GC.Collect();
         GC.WaitForPendingFinalizers();
